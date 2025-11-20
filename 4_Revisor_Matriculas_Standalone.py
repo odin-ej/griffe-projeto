@@ -2,6 +2,8 @@
 """
 GRIFFE HUB - Revisor de Matrículas (Versão Standalone)
 Sistema de revisão de formulários de matrícula
+Arquivo atualizado: implementa normalização de colunas, tolerância a variações,
+mensagens de aviso quando abas/colunas estão faltando e tratamento de planilhas vazias.
 """
 
 import streamlit as st
@@ -9,9 +11,9 @@ import pandas as pd
 from typing import Dict, List
 from pathlib import Path
 
-# ============================================================================
+# ============================================================================	
 # CONFIGURAÇÃO DA PÁGINA
-# ============================================================================
+# ============================================================================	
 
 st.set_page_config(
     page_title="Revisor de Matrículas - Griffe Hub",
@@ -19,90 +21,161 @@ st.set_page_config(
     layout="wide"
 )
 
-# ============================================================================
+# ============================================================================	
 # CLASSES E FUNÇÕES DO BACKEND (INCORPORADAS)
-# ============================================================================
+# ============================================================================	
 
 class ExcelReader:
     """Classe para ler e processar dados da planilha de matrículas"""
-    
+
+    EXPECTED_SHEETS = ["Form_Matrícula", "Form_Inicial", "Form_Médico"]
+
     def __init__(self, excel_file_path: str):
         self.excel_file = excel_file_path
-        self.df_matricula = None
-        self.df_inicial = None
-        self.df_medico = None
+        self.df_matricula = pd.DataFrame()
+        self.df_inicial = pd.DataFrame()
+        self.df_medico = pd.DataFrame()
         self.students = []
-        
+        self.sheet_status = {}  # status de cada sheet lida
+        self.missing_columns = {}  # possíveis colunas faltando por sheet
+
+    def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Padroniza colunas para evitar erros de KeyError (strip, upper, remove acentos)."""
+        if df is None or df.shape[1] == 0:
+            return df
+        # Força string nas colunas e padroniza
+        cols = (
+            df.columns.astype(str)
+              .str.strip()
+              .str.upper()
+              .str.normalize('NFKD')
+              .str.encode('ascii', errors='ignore')
+              .str.decode('utf-8')
+        )
+        df = df.copy()
+        df.columns = cols
+        return df
+
     def load_data(self) -> bool:
-        """Carrega os dados das 3 sheets principais"""
+        """Carrega os dados das 3 sheets principais de forma tolerante.
+
+        Mantém os nomes das abas conforme pedido (com acento).
+        Se uma aba não existir, cria um DataFrame vazio para ela e registra o aviso.
+        """
         try:
-            self.df_matricula = pd.read_excel(self.excel_file, sheet_name='Form_Matrícula')
-            self.df_inicial = pd.read_excel(self.excel_file, sheet_name='Form_Inicial')
-            self.df_medico = pd.read_excel(self.excel_file, sheet_name='Form_Médico')
-            
+            xls = pd.ExcelFile(self.excel_file)
+            available = xls.sheet_names
+            # Ler cada sheet somente se existir
+            for sheet in self.EXPECTED_SHEETS:
+                if sheet in available:
+                    df = pd.read_excel(xls, sheet_name=sheet)
+                    df = self._normalize_columns(df)
+                    setattr(self, f"df_{sheet.split('_')[1].lower()}", df)
+                    self.sheet_status[sheet] = "loaded"
+                else:
+                    # Mantém DataFrame vazio mas registra falta
+                    setattr(self, f"df_{sheet.split('_')[1].lower()}", pd.DataFrame())
+                    self.sheet_status[sheet] = "missing"
+
+            # Após carregar, verifica colunas importantes e registra missing_columns
+            for sheet_attr, sheet_name in [
+                ("df_matrícula", "Form_Matrícula"),
+                ("df_inicial", "Form_Inicial"),
+                ("df_médico", "Form_Médico"),
+            ]:
+                df = getattr(self, sheet_attr.replace("í","i").replace("ê","e"), pd.DataFrame())
+                # Note: attributes in object are df_matricula, df_inicial, df_medico
+                # We'll map correctly:
+            # Map to the actual attributes we set earlier
+            self.df_matricula = getattr(self, "df_matricula", pd.DataFrame())
+            self.df_inicial = getattr(self, "df_inicial", pd.DataFrame())
+            self.df_medico = getattr(self, "df_medico", pd.DataFrame())
+
+            # Check for key columns in each loaded sheet
+            for sheet, df in [("Form_Matrícula", self.df_matricula),
+                              ("Form_Inicial", self.df_inicial),
+                              ("Form_Médico", self.df_medico)]:
+                missing = []
+                if df is None or df.shape[1] == 0:
+                    # empty sheet
+                    self.missing_columns[sheet] = ["(sheet empty or not loaded)"]
+                    continue
+                # Find approximations for Nome Completo and Email
+                nome_col = next((c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
+                email_col = next((c for c in df.columns if "EMAIL" in c), None)
+                if not nome_col:
+                    missing.append("NOME COMPLETO (approx)")
+                if not email_col:
+                    missing.append("EMAIL (approx)")
+                self.missing_columns[sheet] = missing if missing else []
+
+            # Build student list
             self._build_student_list()
             return True
         except Exception as e:
             st.error(f"Erro ao carregar dados: {e}")
             return False
-    
+
     def _build_student_list(self):
-        """Cria lista de estudantes únicos baseado em NOME COMPLETO e EMAIL"""
+        """Cria lista de estudantes únicos baseado em NOME COMPLETO e EMAIL (tolerante)"""
         students_set = set()
-        
-        for df in [self.df_matricula, self.df_inicial, self.df_medico]:
-            if df is not None and len(df) > 0:
-                for _, row in df.iterrows():
-                    nome = row.get('NOME COMPLETO', '')
-                    email = row.get('EMAIL', '')
-                    
-                    if pd.notna(nome) and nome:
-                        students_set.add((str(nome).strip(), str(email).strip() if pd.notna(email) else ''))
-        
+
+        for df, sheet in [(self.df_matricula, "Form_Matrícula"),
+                          (self.df_inicial, "Form_Inicial"),
+                          (self.df_medico, "Form_Médico")]:
+            if df is None or df.shape[0] == 0:
+                continue
+            nome_col = next((c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
+            email_col = next((c for c in df.columns if "EMAIL" in c), None)
+
+            if not nome_col:
+                # não conseguimos identificar coluna de nome nessa sheet
+                continue
+
+            for _, row in df.iterrows():
+                nome = row.get(nome_col, "")
+                email = row.get(email_col, "") if email_col else ""
+                if pd.notna(nome) and str(nome).strip():
+                    students_set.add((str(nome).strip(), str(email).strip() if pd.notna(email) and str(email).strip() else ""))
+
         self.students = sorted(list(students_set), key=lambda x: x[0])
-    
+
     def get_students(self) -> List[Dict[str, str]]:
         """Retorna lista de estudantes"""
         return [{'nome': nome, 'email': email} for nome, email in self.students]
-    
+
+    def _match_row(self, df: pd.DataFrame, nome: str, email: str):
+        """Retorna linha correspondente tolerante a variações de nomes de colunas"""
+        if df is None or df.shape[0] == 0:
+            return None
+
+        nome_col = next((c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
+        email_col = next((c for c in df.columns if "EMAIL" in c), None)
+        if not nome_col:
+            return None
+
+        # Comparação tolerante
+        mask = df[nome_col].astype(str).str.strip() == nome.strip()
+        if email and email_col:
+            mask = mask & (df[email_col].astype(str).str.strip() == email.strip())
+
+        matches = df[mask]
+        if len(matches) > 0:
+            return matches.iloc[0].to_dict()
+        return None
+
     def get_student_data(self, nome: str, email: str) -> Dict:
         """Busca dados de um estudante específico em todas as sheets"""
-        data = {'matricula': {}, 'inicial': {}, 'medico': {}}
-        
-        # Buscar em Form_Matrícula
-        if self.df_matricula is not None:
-            mask = (self.df_matricula['NOME COMPLETO'].str.strip() == nome.strip())
-            if email:
-                mask = mask & (self.df_matricula['EMAIL'].str.strip() == email.strip())
-            
-            matches = self.df_matricula[mask]
-            if len(matches) > 0:
-                data['matricula'] = matches.iloc[0].to_dict()
-        
-        # Buscar em Form_Inicial
-        if self.df_inicial is not None:
-            mask = (self.df_inicial['NOME COMPLETO'].str.strip() == nome.strip())
-            if email:
-                mask = mask & (self.df_inicial['EMAIL'].str.strip() == email.strip())
-            
-            matches = self.df_inicial[mask]
-            if len(matches) > 0:
-                data['inicial'] = matches.iloc[0].to_dict()
-        
-        # Buscar em Form_Médico
-        if self.df_medico is not None:
-            mask = (self.df_medico['NOME COMPLETO'].str.strip() == nome.strip())
-            if email:
-                mask = mask & (self.df_medico['EMAIL'].str.strip() == email.strip())
-            
-            matches = self.df_medico[mask]
-            if len(matches) > 0:
-                data['medico'] = matches.iloc[0].to_dict()
-        
-        return data
+        return {
+            'matricula': self._match_row(self.df_matricula, nome, email),
+            'inicial': self._match_row(self.df_inicial, nome, email),
+            'medico': self._match_row(self.df_medico, nome, email),
+        }
 
+# ============================================================================	
+# Mapeamento de campos (mantido)
+# ============================================================================	
 
-# Mapeamento de campos
 FORM_MATRICULA_SECTIONS = {
     "Section 1 - Student Information": [
         "NOME DO ESTUDANTE", "SOBRENOME COMPLETO DO ESTUDANTE",
@@ -174,9 +247,9 @@ def get_field_label(field_name: str) -> str:
     label = label.replace('1️⃣1️⃣', '').replace('1️⃣2️⃣', '')
     return label.strip()
 
-# ============================================================================
+# ============================================================================	
 # FUNÇÕES AUXILIARES DE INTERFACE
-# ============================================================================
+# ============================================================================	
 
 def format_value(value):
     """Formata valor para exibição"""
@@ -189,11 +262,11 @@ def format_value(value):
 def render_field(label, value, key):
     """Renderiza um campo com botão de copiar"""
     col1, col2 = st.columns([4, 1])
-    
+
     with col1:
         st.markdown(f"**{label}**")
         formatted_value = format_value(value)
-        
+
         if formatted_value:
             st.markdown(
                 f'<div style="background-color: #f0f2f6; padding: 10px; '
@@ -207,7 +280,7 @@ def render_field(label, value, key):
                 f'<em>Não preenchido</em></div>',
                 unsafe_allow_html=True
             )
-    
+
     with col2:
         if formatted_value:
             if st.button("📋", key=f"copy_{key}", use_container_width=True, 
@@ -218,18 +291,18 @@ def render_section(section_title, fields, data, form_type):
     """Renderiza uma seção do formulário"""
     st.markdown(f"### {section_title}")
     st.markdown("---")
-    
+
     for field in fields:
         value = data.get(field, "")
         key = f"{form_type}_{field}_{section_title}"
         label = get_field_label(field)
         render_field(label, value, key)
-    
+
     st.markdown("<br>", unsafe_allow_html=True)
 
-# ============================================================================
+# ============================================================================	
 # INTERFACE PRINCIPAL
-# ============================================================================
+# ============================================================================	
 
 st.title("📋 Revisor de Matrículas")
 st.markdown("Sistema de Revisão de Formulários de Matrícula")
@@ -239,8 +312,12 @@ st.markdown("---")
 with st.sidebar:
     st.markdown("### 🏠 Navegação")
     if st.button("← Voltar ao Hub", use_container_width=True):
-        st.switch_page("streamlit_app.py")
-    
+        try:
+            st.switch_page("streamlit_app.py")
+        except Exception:
+            # fallback: não quebrar caso não exista a página
+            pass
+
     st.markdown("---")
     st.markdown("### ℹ️ Como Usar")
     st.markdown("""
@@ -264,18 +341,30 @@ uploaded_file = st.file_uploader(
 if uploaded_file:
     import tempfile
     import os
-    
+    from io import BytesIO
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_path = tmp_file.name
-    
+
     try:
         with st.spinner("Carregando dados..."):
             reader = ExcelReader(tmp_path)
-            if reader.load_data():
+            ok = reader.load_data()
+            # Mostrar avisos úteis sobre sheets e colunas
+            missing_sheets = [s for s, status in reader.sheet_status.items() if status != "loaded"]
+            if missing_sheets:
+                st.warning(f"As seguintes abas não foram encontradas: {', '.join(missing_sheets)}. O app continuará, mas algumas informações podem ficar incompletas.")
+            # Mostrar colunas faltando por sheet (se houver)
+            for sheet, missing in reader.missing_columns.items():
+                if missing:
+                    st.info(f"Atenção - {sheet}: {', '.join(missing)}")
+            if ok:
                 st.success(f"✅ {len(reader.get_students())} estudantes encontrados")
                 st.session_state['reader'] = reader
                 st.session_state['students'] = reader.get_students()
+            else:
+                st.error("Falha ao carregar a planilha. Veja as mensagens acima.")
     except Exception as e:
         st.error(f"❌ Erro: {str(e)}")
     finally:
@@ -286,18 +375,18 @@ if uploaded_file:
 if 'students' in st.session_state and st.session_state['students']:
     st.markdown("---")
     st.header("👤 Seleção de Aluno")
-    
+
     student_options = [
         f"{s['nome']} ({s['email']})" if s['email'] else s['nome']
         for s in st.session_state['students']
     ]
-    
+
     selected_index = st.selectbox(
         "Selecione um aluno:",
         range(len(student_options)),
         format_func=lambda i: student_options[i]
     )
-    
+
     if selected_index is not None:
         selected_student = st.session_state['students'][selected_index]
         reader = st.session_state['reader']
@@ -305,15 +394,15 @@ if 'students' in st.session_state and st.session_state['students']:
             selected_student['nome'], 
             selected_student['email']
         )
-        
+
         st.markdown("---")
-        
+
         tab1, tab2, tab3 = st.tabs([
             "📝 Form Matrícula", 
             "📄 Form Inicial", 
             "🏥 Form Médico"
         ])
-        
+
         with tab1:
             st.header("📝 Formulário de Matrícula")
             if student_data['matricula']:
@@ -323,7 +412,7 @@ if 'students' in st.session_state and st.session_state['students']:
                                      student_data['matricula'], 'matricula')
             else:
                 st.warning("⚠️ Sem dados")
-        
+
         with tab2:
             st.header("📄 Formulário Inicial")
             if student_data['inicial']:
@@ -333,7 +422,7 @@ if 'students' in st.session_state and st.session_state['students']:
                                      student_data['inicial'], 'inicial')
             else:
                 st.warning("⚠️ Sem dados")
-        
+
         with tab3:
             st.header("🏥 Formulário Médico")
             if student_data['medico']:
