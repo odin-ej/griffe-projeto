@@ -11,9 +11,9 @@ import pandas as pd
 from typing import Dict, List
 from pathlib import Path
 
-# ============================================================================	
+# ============================================================================
 # CONFIGURAÇÃO DA PÁGINA
-# ============================================================================	
+# ============================================================================
 
 st.set_page_config(
     page_title="Revisor de Matrículas - Griffe Hub",
@@ -21,9 +21,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# ============================================================================	
+# ============================================================================
 # CLASSES E FUNÇÕES DO BACKEND (INCORPORADAS)
-# ============================================================================	
+# ============================================================================
+
 
 class ExcelReader:
     """Classe para ler e processar dados da planilha de matrículas"""
@@ -66,27 +67,23 @@ class ExcelReader:
             xls = pd.ExcelFile(self.excel_file)
             available = xls.sheet_names
             # Ler cada sheet somente se existir
+            SHEET_MAP = {
+                "Form_Matrícula": "df_matricula",
+                "Form_Inicial": "df_inicial",
+                "Form_Médico": "df_medico",
+            }
             for sheet in self.EXPECTED_SHEETS:
                 if sheet in available:
                     df = pd.read_excel(xls, sheet_name=sheet)
                     df = self._normalize_columns(df)
-                    setattr(self, f"df_{sheet.split('_')[1].lower()}", df)
+                    setattr(self, SHEET_MAP[sheet], df)
                     self.sheet_status[sheet] = "loaded"
                 else:
-                    # Mantém DataFrame vazio mas registra falta
-                    setattr(self, f"df_{sheet.split('_')[1].lower()}", pd.DataFrame())
+                    setattr(self, SHEET_MAP[sheet], pd.DataFrame())
                     self.sheet_status[sheet] = "missing"
 
             # Após carregar, verifica colunas importantes e registra missing_columns
-            for sheet_attr, sheet_name in [
-                ("df_matrícula", "Form_Matrícula"),
-                ("df_inicial", "Form_Inicial"),
-                ("df_médico", "Form_Médico"),
-            ]:
-                df = getattr(self, sheet_attr.replace("í","i").replace("ê","e"), pd.DataFrame())
-                # Note: attributes in object are df_matricula, df_inicial, df_medico
-                # We'll map correctly:
-            # Map to the actual attributes we set earlier
+
             self.df_matricula = getattr(self, "df_matricula", pd.DataFrame())
             self.df_inicial = getattr(self, "df_inicial", pd.DataFrame())
             self.df_medico = getattr(self, "df_medico", pd.DataFrame())
@@ -98,10 +95,12 @@ class ExcelReader:
                 missing = []
                 if df is None or df.shape[1] == 0:
                     # empty sheet
-                    self.missing_columns[sheet] = ["(sheet empty or not loaded)"]
+                    self.missing_columns[sheet] = [
+                        "(sheet empty or not loaded)"]
                     continue
                 # Find approximations for Nome Completo and Email
-                nome_col = next((c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
+                nome_col = next(
+                    (c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
                 email_col = next((c for c in df.columns if "EMAIL" in c), None)
                 if not nome_col:
                     missing.append("NOME COMPLETO (approx)")
@@ -125,7 +124,8 @@ class ExcelReader:
                           (self.df_medico, "Form_Médico")]:
             if df is None or df.shape[0] == 0:
                 continue
-            nome_col = next((c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
+            nome_col = next(
+                (c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
             email_col = next((c for c in df.columns if "EMAIL" in c), None)
 
             if not nome_col:
@@ -136,7 +136,8 @@ class ExcelReader:
                 nome = row.get(nome_col, "")
                 email = row.get(email_col, "") if email_col else ""
                 if pd.notna(nome) and str(nome).strip():
-                    students_set.add((str(nome).strip(), str(email).strip() if pd.notna(email) and str(email).strip() else ""))
+                    students_set.add((str(nome).strip(), str(email).strip(
+                    ) if pd.notna(email) and str(email).strip() else ""))
 
         self.students = sorted(list(students_set), key=lambda x: x[0])
 
@@ -149,7 +150,8 @@ class ExcelReader:
         if df is None or df.shape[0] == 0:
             return None
 
-        nome_col = next((c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
+        nome_col = next(
+            (c for c in df.columns if "NOME" in c and "COMPLETO" in c), None)
         email_col = next((c for c in df.columns if "EMAIL" in c), None)
         if not nome_col:
             return None
@@ -157,7 +159,8 @@ class ExcelReader:
         # Comparação tolerante
         mask = df[nome_col].astype(str).str.strip() == nome.strip()
         if email and email_col:
-            mask = mask & (df[email_col].astype(str).str.strip() == email.strip())
+            mask = mask & (df[email_col].astype(
+                str).str.strip() == email.strip())
 
         matches = df[mask]
         if len(matches) > 0:
@@ -172,9 +175,10 @@ class ExcelReader:
             'medico': self._match_row(self.df_medico, nome, email),
         }
 
-# ============================================================================	
+# ============================================================================
 # Mapeamento de campos (mantido)
-# ============================================================================	
+# ============================================================================
+
 
 FORM_MATRICULA_SECTIONS = {
     "Section 1 - Student Information": [
@@ -238,6 +242,7 @@ FORM_MEDICO_SECTIONS = {
     ],
 }
 
+
 def get_field_label(field_name: str) -> str:
     """Converte nome de campo em label amigável"""
     label = field_name
@@ -247,9 +252,10 @@ def get_field_label(field_name: str) -> str:
     label = label.replace('1️⃣1️⃣', '').replace('1️⃣2️⃣', '')
     return label.strip()
 
-# ============================================================================	
+# ============================================================================
 # FUNÇÕES AUXILIARES DE INTERFACE
-# ============================================================================	
+# ============================================================================
+
 
 def format_value(value):
     """Formata valor para exibição"""
@@ -258,6 +264,7 @@ def format_value(value):
     if isinstance(value, pd.Timestamp):
         return value.strftime("%d/%m/%Y")
     return str(value)
+
 
 def render_field(label, value, key):
     """Renderiza um campo com botão de copiar"""
@@ -283,9 +290,10 @@ def render_field(label, value, key):
 
     with col2:
         if formatted_value:
-            if st.button("📋", key=f"copy_{key}", use_container_width=True, 
-                        help="Clique para copiar"):
+            if st.button("📋", key=f"copy_{key}", use_container_width=True,
+                         help="Clique para copiar"):
                 st.code(formatted_value, language=None)
+
 
 def render_section(section_title, fields, data, form_type):
     """Renderiza uma seção do formulário"""
@@ -300,9 +308,10 @@ def render_section(section_title, fields, data, form_type):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-# ============================================================================	
+# ============================================================================
 # INTERFACE PRINCIPAL
-# ============================================================================	
+# ============================================================================
+
 
 st.title("📋 Revisor de Matrículas")
 st.markdown("Sistema de Revisão de Formulários de Matrícula")
@@ -352,15 +361,18 @@ if uploaded_file:
             reader = ExcelReader(tmp_path)
             ok = reader.load_data()
             # Mostrar avisos úteis sobre sheets e colunas
-            missing_sheets = [s for s, status in reader.sheet_status.items() if status != "loaded"]
+            missing_sheets = [
+                s for s, status in reader.sheet_status.items() if status != "loaded"]
             if missing_sheets:
-                st.warning(f"As seguintes abas não foram encontradas: {', '.join(missing_sheets)}. O app continuará, mas algumas informações podem ficar incompletas.")
+                st.warning(
+                    f"As seguintes abas não foram encontradas: {', '.join(missing_sheets)}. O app continuará, mas algumas informações podem ficar incompletas.")
             # Mostrar colunas faltando por sheet (se houver)
             for sheet, missing in reader.missing_columns.items():
                 if missing:
                     st.info(f"Atenção - {sheet}: {', '.join(missing)}")
             if ok:
-                st.success(f"✅ {len(reader.get_students())} estudantes encontrados")
+                st.success(
+                    f"✅ {len(reader.get_students())} estudantes encontrados")
                 st.session_state['reader'] = reader
                 st.session_state['students'] = reader.get_students()
             else:
@@ -391,15 +403,15 @@ if 'students' in st.session_state and st.session_state['students']:
         selected_student = st.session_state['students'][selected_index]
         reader = st.session_state['reader']
         student_data = reader.get_student_data(
-            selected_student['nome'], 
+            selected_student['nome'],
             selected_student['email']
         )
 
         st.markdown("---")
 
         tab1, tab2, tab3 = st.tabs([
-            "📝 Form Matrícula", 
-            "📄 Form Inicial", 
+            "📝 Form Matrícula",
+            "📄 Form Inicial",
             "🏥 Form Médico"
         ])
 
@@ -408,8 +420,8 @@ if 'students' in st.session_state and st.session_state['students']:
             if student_data['matricula']:
                 for section, fields in FORM_MATRICULA_SECTIONS.items():
                     with st.expander(section, expanded=False):
-                        render_section(section, fields, 
-                                     student_data['matricula'], 'matricula')
+                        render_section(section, fields,
+                                       student_data['matricula'], 'matricula')
             else:
                 st.warning("⚠️ Sem dados")
 
@@ -418,8 +430,8 @@ if 'students' in st.session_state and st.session_state['students']:
             if student_data['inicial']:
                 for section, fields in FORM_INICIAL_SECTIONS.items():
                     with st.expander(section, expanded=False):
-                        render_section(section, fields, 
-                                     student_data['inicial'], 'inicial')
+                        render_section(section, fields,
+                                       student_data['inicial'], 'inicial')
             else:
                 st.warning("⚠️ Sem dados")
 
@@ -428,8 +440,8 @@ if 'students' in st.session_state and st.session_state['students']:
             if student_data['medico']:
                 for section, fields in FORM_MEDICO_SECTIONS.items():
                     with st.expander(section, expanded=False):
-                        render_section(section, fields, 
-                                     student_data['medico'], 'medico')
+                        render_section(section, fields,
+                                       student_data['medico'], 'medico')
             else:
                 st.warning("⚠️ Sem dados")
 else:
